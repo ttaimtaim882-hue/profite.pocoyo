@@ -1,0 +1,53 @@
+name: Build IPA (Lovable)
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unzip archives if present
+        run: |
+          find . -name "*.zip" -not -path "./.git/*" | while read z; do
+            echo "Unzipping $z"; unzip -o -q "$z" -d "$(dirname "$z")"
+          done
+      - name: Detect project type
+        id: detect
+        run: |
+          PUBSPEC=$(find . -name pubspec.yaml -not -path "*/.symlinks/*" -not -path "*/build/*" | head -n1)
+          WS=$(find . -name "*.xcworkspace" -not -path "*/project.xcworkspace" -not -path "*/Pods/*" | head -n1)
+          PROJ=$(find . -name "*.xcodeproj" -not -path "*/Pods/*" | head -n1)
+          if [ -n "$PUBSPEC" ]; then echo "type=flutter" >> $GITHUB_OUTPUT; echo "dir=$(dirname "$PUBSPEC")" >> $GITHUB_OUTPUT;
+          elif [ -n "$WS" ]; then echo "type=workspace" >> $GITHUB_OUTPUT; echo "path=$WS" >> $GITHUB_OUTPUT;
+          elif [ -n "$PROJ" ]; then echo "type=project" >> $GITHUB_OUTPUT; echo "path=$PROJ" >> $GITHUB_OUTPUT;
+          else echo "No Xcode or Flutter project found"; exit 1; fi
+      - uses: subosito/flutter-action@v2
+        if: steps.detect.outputs.type == 'flutter'
+        with:
+          channel: stable
+      - name: Build Flutter
+        if: steps.detect.outputs.type == 'flutter'
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: |
+          flutter pub get
+          flutter build ios --release --no-codesign
+          mkdir -p $GITHUB_WORKSPACE/out/Payload
+          cp -r build/ios/iphoneos/*.app $GITHUB_WORKSPACE/out/Payload/
+      - name: Build Xcode
+        if: steps.detect.outputs.type != 'flutter'
+        run: |
+          P="${{ steps.detect.outputs.path }}"
+          DIR=$(dirname "$P")
+          if [ -f "$DIR/Podfile" ]; then (cd "$DIR" && pod install); P=$(find "$DIR" -maxdepth 1 -name "*.xcworkspace" | head -n1); fi
+          if [[ "$P" == *.xcworkspace ]]; then FLAG="-workspace"; else FLAG="-project"; fi
+          SCHEME=$(xcodebuild -list $FLAG "$P" -json | python3 -c "import sys,json;d=json.load(sys.stdin);k='workspace' if 'workspace' in d else 'project';print(d[k]['schemes'][0])")
+          xcodebuild $FLAG "$P" -scheme "$SCHEME" -configuration Release -sdk iphoneos \
+            -derivedDataPath build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+          mkdir -p out/Payload
+          cp -r build/Build/Products/Release-iphoneos/*.app out/Payload/
+      - name: Package IPA
+        run: cd out && zip -qry app.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-ipa
+          path: out/app.ipa
