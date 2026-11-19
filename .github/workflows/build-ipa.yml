@@ -1,0 +1,41 @@
+name: Build IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build unsigned IPA
+        shell: bash
+        run: |
+          set -e
+          mkdir -p build
+          if [ -f pubspec.yaml ]; then
+            echo "Flutter project detected"
+            flutter build ios --release --no-codesign
+            APP=$(find build/ios/iphoneos -maxdepth 1 -name "*.app" | head -1)
+            mkdir -p build/Payload
+            cp -r "$APP" build/Payload/
+            cd build && zip -r app.ipa Payload
+          else
+            PROJ=$(find . -maxdepth 3 -name "*.xcodeproj" -not -path "*/Pods/*" | head -1)
+            if [ -z "$PROJ" ]; then
+              echo "No Xcode project found"; exit 1
+            fi
+            SCHEME=$(xcodebuild -list -project "$PROJ" -json | python3 -c "import sys,json;print(json.load(sys.stdin)['project']['schemes'][0])")
+            echo "Building scheme: $SCHEME"
+            xcodebuild -project "$PROJ" -scheme "$SCHEME" -configuration Release -sdk iphoneos CODE_SIGNING_ALLOWED=NO -archivePath build/app.xcarchive archive
+            mkdir -p build/Payload
+            cp -r build/app.xcarchive/Products/Applications/*.app build/Payload/
+            cd build && zip -r app.ipa Payload
+          fi
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-ipa
+          path: build/app.ipa
